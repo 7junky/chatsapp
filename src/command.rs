@@ -7,6 +7,7 @@ pub enum Command {
     CreateRoom(String),
     JoinRoom(String),
     Message(String),
+    Leave,
     Invalid,
     Exit,
 }
@@ -15,6 +16,7 @@ const HELP: &str = ">help";
 const EXIT: &str = ">exit";
 const LIST: &str = ">list";
 const ME: &str = ">me";
+const LEAVE: &str = ">leave";
 const SET_USERNAME: &str = ">set-username";
 const CREATE_ROOM: &str = ">create-room";
 const JOIN_ROOM: &str = ">join-room";
@@ -45,6 +47,7 @@ impl Command {
             HELP => return Command::Help,
             EXIT => return Command::Exit,
             LIST => return Command::List,
+            LEAVE => return Command::Leave,
             ME => return Command::Me,
             _ => {}
         };
