@@ -44,7 +44,7 @@ pub async fn new(redis: &Client, room: &str) -> Result<(), RoomError> {
 
     let key = gen_key(room);
 
-    let exists: i8 = conn.exists(&key).await.map_err(|e| {
+    let exists: u8 = conn.exists(&key).await.map_err(|e| {
         dbg!("{}", e);
         RoomError::FailedToCheckRoomExists
     })?;
