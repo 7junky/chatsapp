@@ -23,10 +23,7 @@ impl App {
     }
 
     pub async fn run(&mut self, mut stream: TcpStream) -> io::Result<()> {
-        if let Err(e) = greeting(&mut stream).await {
-            dbg!(e);
-            return Ok(());
-        };
+        greeting(&mut stream).await?;
 
         loop {
             let reader = BufReader::new(&mut stream);
