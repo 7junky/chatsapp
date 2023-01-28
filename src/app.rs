@@ -6,19 +6,17 @@ use tokio::net::TcpStream;
 use crate::command::Command;
 
 pub struct App {
-    addr: SocketAddr,
-    state: State,
+    addr: String,
     username: Option<String>,
-    room: Option<String>,
+    state: State,
 }
 
 impl App {
     pub fn new(addr: SocketAddr) -> Self {
         Self {
-            addr,
-            state: State::Outside,
+            addr: addr.to_string(),
             username: None,
-            room: None,
+            state: State::Outside,
         }
     }
 
@@ -37,16 +35,18 @@ impl App {
             let command = Command::parse(message);
 
             match command {
-                Command::Help => {
-                    help(&mut stream).await?;
-                }
+                Command::Help => help(&mut stream).await?,
                 Command::List => todo!(),
+                Command::Me => self.user_info(&mut stream).await?,
                 Command::SetUsername(username) => self.username = Some(username),
-                Command::CreateRoom(_) => todo!(),
-                Command::JoinRoom(room) => self.room = Some(room),
-                Command::Message(msg) => {
-                    self.handle_message(&mut stream, msg).await?;
+                Command::CreateRoom(room) => {
+                    //
                 }
+                Command::JoinRoom(room) => {
+                    //
+                    self.state = State::Inside(room)
+                }
+                Command::Message(msg) => self.handle_message(&mut stream, msg).await?,
                 Command::Invalid => invalid(&mut stream).await?,
                 Command::Exit => break,
             }
@@ -55,9 +55,17 @@ impl App {
         Ok(())
     }
 
+    async fn user_info(&self, stream: &mut TcpStream) -> io::Result<()> {
+        stream
+            .write_all(format!("Username: {:?}, IP: {}\n", self.username, self.addr).as_bytes())
+            .await?;
+
+        Ok(())
+    }
+
     async fn handle_message(&mut self, stream: &mut TcpStream, msg: String) -> io::Result<()> {
         match self.state {
-            State::Inside => {
+            State::Inside(ref room) => {
                 // write chat to redis
                 // how to distribute to others in the room?
                 // plan:
@@ -81,7 +89,7 @@ impl App {
 
 // impl State pattern
 enum State {
-    Inside,
+    Inside(String),
     Outside,
 }
 
@@ -109,6 +117,7 @@ Commands:
 >help              - Display commands
 >exit              - Close connection
 >list              - List rooms
+>me                - Your user info
 >set-username name - Set username
 >create-room room  - Create room
 >join-room room    - Join room\n";
