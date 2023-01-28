@@ -75,15 +75,12 @@ impl App {
     }
 
     async fn user_info(&self, stream: &mut TcpStream) -> io::Result<()> {
-        stream
-            .write_all(
-                format!(
-                    "Username: {:?}, IP: {}\n",
-                    self.user.username, self.user.addr
-                )
-                .as_bytes(),
-            )
-            .await?;
+        let info = format!(
+            "Username: {:?}, IP: {}\n",
+            self.user.username, self.user.addr
+        );
+
+        stream.write_all(info.as_bytes()).await?;
 
         Ok(())
     }
