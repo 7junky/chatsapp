@@ -52,21 +52,38 @@ impl App {
             let command = Command::parse(message);
 
             match command {
-                Command::Help => help(&mut stream).await?,
-                Command::List => match room::list(&self.redis).await {
-                    Ok(list) => rooms(&mut stream, list).await?,
-                    Err(e) => error(&mut stream, e).await?,
-                },
-                Command::Me => self.user_info(&mut stream).await?,
-                Command::SetUsername(username) => self.user.username = Some(username),
-                Command::CreateRoom(room) => match room::new(&self.redis, &room).await {
-                    Ok(_) => {}
-                    Err(e) => error(&mut stream, e).await?,
-                },
-                Command::JoinRoom(room) => self.handle_join(&mut stream, room).await?,
-                Command::Message(msg) => self.handle_message(&mut stream, msg).await?,
-                Command::Leave => self.handle_leave(&mut stream).await?,
-                Command::Invalid => invalid(&mut stream).await?,
+                Command::Help => {
+                    help(&mut stream).await?;
+                }
+                Command::List => {
+                    match room::list(&self.redis).await {
+                        Ok(list) => rooms(&mut stream, list).await?,
+                        Err(e) => error(&mut stream, e).await?,
+                    };
+                }
+                Command::Me => {
+                    self.user_info(&mut stream).await?;
+                }
+                Command::SetUsername(username) => {
+                    self.user.username = Some(username);
+                }
+                Command::CreateRoom(room) => {
+                    if let Err(e) = room::new(&self.redis, &room).await {
+                        error(&mut stream, e).await?
+                    };
+                }
+                Command::JoinRoom(room) => {
+                    self.handle_join(&mut stream, room).await?;
+                }
+                Command::Message(msg) => {
+                    self.handle_message(&mut stream, msg).await?;
+                }
+                Command::Leave => {
+                    self.handle_leave(&mut stream).await?;
+                }
+                Command::Invalid => {
+                    invalid(&mut stream).await?;
+                }
                 Command::Exit => break,
             }
         }
