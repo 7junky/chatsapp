@@ -81,7 +81,7 @@ pub async fn event<'a>(
     event: RoomEvent<'a>,
     room: &str,
     username: &str,
-) -> Result<(), RoomError> {
+) -> Result<String, RoomError> {
     let mut conn = redis.get_async_connection().await.map_err(|e| {
         dbg!("{}", e);
         RoomError::FailedToConnect
@@ -90,34 +90,40 @@ pub async fn event<'a>(
     let key = gen_key(room);
     let score = get_time_in_ms();
 
-    match event {
+    let msg = match event {
         RoomEvent::Chat(message) => {
             let chat = gen_chat(username, message);
 
-            conn.zadd(key, chat, score).await.map_err(|e| {
+            conn.zadd(key, &chat, score).await.map_err(|e| {
                 dbg!("{}", e);
                 RoomError::FailedToSend
             })?;
+
+            chat
         }
         RoomEvent::Join => {
             let join = gen_join_msg(username);
 
-            conn.zadd(key, join, score).await.map_err(|e| {
+            conn.zadd(key, &join, score).await.map_err(|e| {
                 dbg!("{}", e);
                 RoomError::FailedToSend
             })?;
+
+            join
         }
         RoomEvent::Leave => {
             let leave = gen_leave_msg(username);
 
-            conn.zadd(key, leave, score).await.map_err(|e| {
+            conn.zadd(key, &leave, score).await.map_err(|e| {
                 dbg!("{}", e);
                 RoomError::FailedToSend
             })?;
+
+            leave
         }
     };
 
-    Ok(())
+    Ok(msg)
 }
 
 fn gen_key(name: &str) -> String {
