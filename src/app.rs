@@ -123,7 +123,7 @@ impl App {
                 let msg = room::event(
                     &self.redis,
                     RoomEvent::Chat(&msg),
-                    "TODO",
+                    room,
                     self.user.username.as_ref().unwrap(),
                 )
                 .await
