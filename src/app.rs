@@ -3,13 +3,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use redis::Client as RedisClient;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{self, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use crate::command::Command;
 use crate::room;
 
-struct User {
+pub struct User {
     addr: String,
     username: Option<String>,
 }
@@ -38,51 +38,50 @@ impl App {
     }
 
     pub async fn run(&mut self, mut stream: TcpStream) -> io::Result<()> {
-        greeting(&mut stream).await?;
+        let (mut reader, mut writer) = stream.split();
 
-        loop {
-            let reader = BufReader::new(&mut stream);
+        greeting(&mut writer).await?;
 
-            let message = reader
-                .lines()
-                .next_line()
-                .await
-                .map(|v| v.unwrap_or_default())?;
+        let shared_writer = Arc::new(&writer);
 
+        let buf_reader = BufReader::new(&mut reader);
+        let mut lines = buf_reader.lines();
+
+        while let Some(message) = lines.next_line().await? {
             let command = Command::parse(message);
 
             match command {
                 Command::Help => {
-                    help(&mut stream).await?;
+                    help(&mut writer).await?;
                 }
                 Command::List => {
                     match room::list(&self.redis).await {
-                        Ok(list) => rooms(&mut stream, list).await?,
-                        Err(e) => error(&mut stream, e).await?,
+                        Ok(list) => rooms(&mut writer, list).await?,
+                        Err(e) => error(&mut writer, e).await?,
                     };
                 }
                 Command::Me => {
-                    self.user_info(&mut stream).await?;
+                    self.user_info(&mut writer).await?;
                 }
                 Command::SetUsername(username) => {
                     self.user.username = Some(username);
                 }
                 Command::CreateRoom(room) => {
                     if let Err(e) = room::new(&self.redis, &room).await {
-                        error(&mut stream, e).await?
+                        error(&mut writer, e).await?
                     };
                 }
                 Command::JoinRoom(room) => {
-                    self.handle_join(&mut stream, room).await?;
+                    self.handle_join(&mut writer, room).await?;
                 }
                 Command::Message(msg) => {
-                    self.handle_message(&mut stream, msg).await?;
+                    self.handle_message(&mut writer, msg).await?;
                 }
                 Command::Leave => {
-                    self.handle_leave(&mut stream).await?;
+                    self.handle_leave(&mut writer).await?;
                 }
                 Command::Invalid => {
-                    invalid(&mut stream).await?;
+                    invalid(&mut writer).await?;
                 }
                 Command::Exit => break,
             }
@@ -91,7 +90,10 @@ impl App {
         Ok(())
     }
 
-    async fn user_info(&self, stream: &mut TcpStream) -> io::Result<()> {
+    async fn user_info<T>(&self, stream: &mut T) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin,
+    {
         let info = format!(
             "Username: {:?}, IP: {}\n",
             self.user.username, self.user.addr
@@ -102,7 +104,10 @@ impl App {
         Ok(())
     }
 
-    async fn handle_message(&mut self, stream: &mut TcpStream, msg: String) -> io::Result<()> {
+    async fn handle_message<T>(&mut self, stream: &mut T, msg: String) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin,
+    {
         match self.state {
             State::Inside(ref room) => {
                 // write chat to redis
@@ -121,7 +126,10 @@ impl App {
         Ok(())
     }
 
-    async fn handle_join(&mut self, stream: &mut TcpStream, room: String) -> io::Result<()> {
+    async fn handle_join<T>(&mut self, stream: &mut T, room: String) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin,
+    {
         match self.state {
             State::Inside(ref current_room) => {
                 // Notify current room of leaving
@@ -141,7 +149,10 @@ impl App {
         Ok(())
     }
 
-    async fn handle_leave(&mut self, stream: &mut TcpStream) -> io::Result<()> {
+    async fn handle_leave<T>(&mut self, stream: &mut T) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin,
+    {
         match self.state {
             State::Inside(ref room) => {
                 // Notify room of leaving
@@ -156,7 +167,10 @@ impl App {
     }
 }
 
-async fn greeting(stream: &mut TcpStream) -> io::Result<()> {
+async fn greeting<T>(stream: &mut T) -> io::Result<()>
+where
+    T: AsyncWrite + Unpin,
+{
     let greeting = b"Welcome to ChatsApp!
 Enter \">help\" for a list of commands and their usage.\n\n\n";
 
@@ -165,7 +179,10 @@ Enter \">help\" for a list of commands and their usage.\n\n\n";
     Ok(())
 }
 
-async fn invalid(stream: &mut TcpStream) -> io::Result<()> {
+async fn invalid<T>(stream: &mut T) -> io::Result<()>
+where
+    T: AsyncWrite + Unpin,
+{
     let invalid = b"Invalid command.
 Enter \">help\" for a list of commands and their usage.\n";
 
@@ -174,7 +191,10 @@ Enter \">help\" for a list of commands and their usage.\n";
     Ok(())
 }
 
-async fn help(stream: &mut TcpStream) -> io::Result<()> {
+async fn help<T>(stream: &mut T) -> io::Result<()>
+where
+    T: AsyncWrite + Unpin,
+{
     let help = b"\
 Commands:
 >help              - Display commands
@@ -190,7 +210,10 @@ Commands:
     Ok(())
 }
 
-async fn rooms(stream: &mut TcpStream, list: HashSet<String>) -> io::Result<()> {
+async fn rooms<T>(stream: &mut T, list: HashSet<String>) -> io::Result<()>
+where
+    T: AsyncWrite + Unpin,
+{
     let mut res = String::new();
 
     for room in list {
@@ -203,13 +226,19 @@ async fn rooms(stream: &mut TcpStream, list: HashSet<String>) -> io::Result<()> 
     Ok(())
 }
 
-async fn error(stream: &mut TcpStream, error: impl std::error::Error) -> io::Result<()> {
+async fn error<T>(stream: &mut T, error: impl std::error::Error) -> io::Result<()>
+where
+    T: AsyncWrite + Unpin,
+{
     stream.write_all(error.to_string().as_bytes()).await?;
 
     Ok(())
 }
 
-async fn not_in_room(stream: &mut TcpStream) -> io::Result<()> {
+async fn not_in_room<T>(stream: &mut T) -> io::Result<()>
+where
+    T: AsyncWrite + Unpin,
+{
     stream
         .write_all(b"You're not currently in a room.\n")
         .await?;
