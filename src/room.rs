@@ -131,15 +131,15 @@ fn gen_key(name: &str) -> String {
 }
 
 fn gen_chat(username: &str, message: &str) -> String {
-    format!("{}: {}", username, message)
+    format!("{}: {}\n", username, message)
 }
 
 fn gen_join_msg(username: &str) -> String {
-    format!("{} has joined the room", username)
+    format!("{} has joined the room\n", username)
 }
 
 fn gen_leave_msg(username: &str) -> String {
-    format!("{} has left the room", username)
+    format!("{} has left the room\n", username)
 }
 
 fn get_time_in_ms() -> isize {

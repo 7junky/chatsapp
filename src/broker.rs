@@ -4,17 +4,20 @@ use std::{
 };
 
 use tokio::{
-    io::{self, AsyncWrite, AsyncWriteExt},
+    io::{self, AsyncWriteExt},
+    net::tcp::OwnedWriteHalf,
     sync::{
         mpsc::{self, Receiver, Sender},
-        Mutex,
+        Mutex, RwLock,
     },
 };
 
-pub enum Event<T> {
+pub type SharedStream = Arc<Mutex<OwnedWriteHalf>>;
+
+pub enum BrokerEvent {
     JoinRoom {
         user: String,
-        stream: Arc<Mutex<T>>,
+        stream: SharedStream,
         msg: String,
     },
     LeaveRoom {
@@ -27,35 +30,48 @@ pub enum Event<T> {
     },
 }
 
-// Shouldn't this be per room?
-async fn broker<T>(mut events: Receiver<Event<T>>) -> io::Result<()>
-where
-    T: AsyncWrite + Unpin + Send + 'static,
-{
+pub type RoomMap = Arc<RwLock<HashMap<String, Sender<BrokerEvent>>>>;
+
+pub fn bootstrap_rooms() -> RoomMap {
+    // TODO: Since rooms are persisted in redis, calling this function
+    // should fetch and store into map, spawning new brokers for each.
+
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+pub async fn spawn_broker(room: String, rooms_map: &RoomMap) {
+    let (room_tx, room_rx) = mpsc::channel(100);
+
+    tokio::spawn(broker(room_rx));
+
+    rooms_map.write().await.insert(room, room_tx);
+}
+
+pub async fn broker(mut events: Receiver<BrokerEvent>) -> io::Result<()> {
     // <User, Sender from the User>
     let mut users: HashMap<String, Sender<String>> = HashMap::new();
 
     while let Some(event) = events.recv().await {
         match event {
-            Event::JoinRoom { user, stream, msg } => {
+            BrokerEvent::JoinRoom { user, stream, msg } => {
                 // Add user to peers:
                 match users.entry(user) {
                     Entry::Occupied(..) => (),
                     Entry::Vacant(entry) => {
-                        let (client_sender, client_receiver) = mpsc::channel(100);
-                        entry.insert(client_sender);
+                        let (message_tx, message_rx) = mpsc::channel(100);
+                        entry.insert(message_tx);
                         // This task is responsible for writing messages to the connected user.
-                        tokio::spawn(receive_messages(client_receiver, stream));
+                        tokio::spawn(receive_messages(message_rx, stream));
                     }
                 };
                 // TODO: write message to users
             }
-            Event::LeaveRoom { user, msg } => {
+            BrokerEvent::LeaveRoom { user, msg } => {
                 // Remove user from peers:
                 users.remove(&user);
                 // TODO: write message to users
             }
-            Event::Message { user, msg } => {
+            BrokerEvent::Message { user, msg } => {
                 // Loop over each user in the room
                 for (u, sender) in &users {
                     // If they're the sender of the message, skip since they'll see
@@ -76,11 +92,7 @@ where
     Ok(())
 }
 
-// async fn receive_messages<T>(mut messages: Receiver<String>, stream: Arc<Mutex<T>>)
-async fn receive_messages<T>(mut messages: Receiver<String>, stream: Arc<Mutex<T>>)
-where
-    T: AsyncWrite + Unpin,
-{
+async fn receive_messages(mut messages: Receiver<String>, stream: SharedStream) {
     // Dropping the Sender should kill this task
     while let Some(msg) = messages.recv().await {
         let mut stream = stream.lock().await;

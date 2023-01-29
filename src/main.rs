@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chatsapp::app::App;
+use chatsapp::{app::App, broker};
 use redis::Client as RedisClient;
 use tokio::{io, net::TcpListener};
 
@@ -11,13 +11,17 @@ async fn main() -> io::Result<()> {
     let redis = RedisClient::open("redis://:redis@127.0.0.1/").unwrap();
     let redis = Arc::new(redis);
 
+    let rooms = broker::bootstrap_rooms();
+
     loop {
         let redis = Arc::clone(&redis);
+        let rooms = Arc::clone(&rooms);
+
         let (stream, addr) = listener.accept().await?;
         tokio::spawn(async move {
             let mut app = App::new(addr, redis);
 
-            if let Err(e) = app.run(stream).await {
+            if let Err(e) = app.run(stream, rooms).await {
                 eprintln!("{}", e)
             };
         });
