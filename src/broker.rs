@@ -77,7 +77,7 @@ pub async fn broker(mut events: Receiver<BrokerEvent>) -> io::Result<()> {
                     // If they're the sender of the message, skip since they'll see
                     // their message twice
                     if u == &user {
-                        break;
+                        continue;
                     }
 
                     // Send to each user
