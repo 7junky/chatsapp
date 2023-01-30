@@ -14,6 +14,7 @@ use tokio::{
 
 pub type SharedStream = Arc<Mutex<OwnedWriteHalf>>;
 
+#[derive(Debug)]
 pub enum BrokerEvent {
     JoinRoom {
         user: String,

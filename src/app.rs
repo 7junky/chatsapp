@@ -119,15 +119,20 @@ impl App {
         match self.state {
             State::Inside(ref room) => {
                 // TODO: Check username not empty
-                // TODO: Check redis errors
-                let msg = room::event(
+                let msg = match room::event(
                     &self.redis,
                     RoomEvent::Chat(&msg),
                     room,
                     self.user.username.as_ref().unwrap(),
                 )
                 .await
-                .unwrap();
+                {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        error(stream, e).await?;
+                        return Ok(());
+                    }
+                };
 
                 let room_map = room_map.read().await;
 
@@ -136,7 +141,9 @@ impl App {
 
                 // Send message event
                 let user = self.user.username.as_ref().unwrap().to_owned();
-                tx.send(BrokerEvent::Message { user, msg }).await;
+                if let Err(e) = tx.send(BrokerEvent::Message { user, msg }).await {
+                    error(stream, e).await?;
+                }
             }
             State::Outside => not_in_room(stream).await?,
         }
@@ -146,7 +153,7 @@ impl App {
     async fn handle_join(
         &mut self,
         stream: SharedStream,
-        room: String,
+        new_room: String,
         room_map: &RoomMap,
     ) -> io::Result<()> {
         let room_map = room_map.read().await;
@@ -155,74 +162,99 @@ impl App {
         match self.state {
             State::Inside(ref current_room) => {
                 // TODO: Check username not empty
-                // TODO: Check redis errors
-                let leave_msg = room::event(
+                let leave_msg = match room::event(
                     &self.redis,
                     RoomEvent::Leave,
                     &current_room,
                     self.user.username.as_ref().unwrap(),
                 )
                 .await
-                .unwrap();
+                {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        error(stream, e).await?;
+                        return Ok(());
+                    }
+                };
 
                 // TODO: Check username not empty
-                // TODO: Check redis errors
-                let join_msg = room::event(
+                let join_msg = match room::event(
                     &self.redis,
                     RoomEvent::Join,
-                    &room,
+                    &new_room,
                     self.user.username.as_ref().unwrap(),
                 )
                 .await
-                .unwrap();
+                {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        error(stream, e).await?;
+                        return Ok(());
+                    }
+                };
 
                 // Notify current room of leaving
                 let current_tx = room_map.get(current_room).unwrap();
 
-                current_tx
+                if let Err(e) = current_tx
                     .send(BrokerEvent::LeaveRoom {
                         user: user.to_owned(),
                         msg: leave_msg,
                     })
-                    .await;
+                    .await
+                {
+                    error(stream.clone(), e).await?;
+                };
 
                 // Notify new room of joining
-                let new_tx = room_map.get(&room).unwrap();
-                new_tx
+                let new_tx = room_map.get(&new_room).unwrap();
+                if let Err(e) = new_tx
                     .send(BrokerEvent::JoinRoom {
                         user: user.to_owned(),
                         stream: Arc::clone(&stream),
                         msg: join_msg,
                     })
-                    .await;
+                    .await
+                {
+                    error(stream, e).await?;
+                };
 
                 // Update state
-                self.state = State::Inside(room)
+                self.state = State::Inside(new_room)
             }
             State::Outside => {
                 // TODO: Check username not empty
                 // TODO: Check no redis errors
-                let msg = room::event(
+                let msg = match room::event(
                     &self.redis,
                     RoomEvent::Join,
-                    &room,
+                    &new_room,
                     self.user.username.as_ref().unwrap(),
                 )
                 .await
-                .unwrap();
+                {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        error(stream, e).await?;
+                        return Ok(());
+                    }
+                };
 
                 // Notify new room of joining
-                let new_tx = room_map.get(&room).unwrap();
-                new_tx
+                let new_tx = room_map.get(&new_room).unwrap();
+                if let Err(e) = new_tx
                     .send(BrokerEvent::JoinRoom {
                         user: user.to_owned(),
                         stream: Arc::clone(&stream),
                         msg,
                     })
-                    .await;
+                    .await
+                {
+                    error(stream, e).await?;
+                };
 
                 // Update state
-                self.state = State::Inside(room)
+                self.state = State::Inside(new_room)
             }
         }
 
@@ -234,24 +266,34 @@ impl App {
 
         match self.state {
             State::Inside(ref room) => {
-                let msg = room::event(
+                let msg = match room::event(
                     &self.redis,
                     RoomEvent::Leave,
                     room,
                     self.user.username.as_ref().unwrap(),
                 )
                 .await
-                .unwrap();
+                {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        error(stream, e).await?;
+                        return Ok(());
+                    }
+                };
 
                 // Notify room of leaving
                 let tx = room_map.get(room).unwrap();
                 let user = self.user.username.as_ref().unwrap();
 
-                tx.send(BrokerEvent::LeaveRoom {
-                    user: user.to_owned(),
-                    msg,
-                })
-                .await;
+                if let Err(e) = tx
+                    .send(BrokerEvent::LeaveRoom {
+                        user: user.to_owned(),
+                        msg,
+                    })
+                    .await
+                {
+                    error(stream, e).await?;
+                };
 
                 // Update state
                 self.state = State::Outside
