@@ -48,48 +48,59 @@ pub async fn spawn_broker(room: String, rooms_map: &RoomMap) {
 }
 
 pub async fn broker(mut events: Receiver<BrokerEvent>) -> io::Result<()> {
-    // <User, Sender from the User>
+    // <User, Sender for the User>
     let mut users: HashMap<String, Sender<String>> = HashMap::new();
 
     while let Some(event) = events.recv().await {
         match event {
             BrokerEvent::JoinRoom { user, stream, msg } => {
                 // Add user to peers:
-                match users.entry(user) {
+                match users.entry(user.clone()) {
                     Entry::Occupied(..) => (),
                     Entry::Vacant(entry) => {
+                        // Each user will have a tx associated with their name and
+                        // an rx associated with their tcp connection
                         let (message_tx, message_rx) = mpsc::channel(100);
                         entry.insert(message_tx);
+
                         // This task is responsible for writing messages to the connected user.
                         tokio::spawn(receive_messages(message_rx, stream));
+
+                        // Send join msg:
+                        send_messages(msg, user, &users).await;
                     }
                 };
-                // TODO: write message to users
             }
             BrokerEvent::LeaveRoom { user, msg } => {
                 // Remove user from peers:
                 users.remove(&user);
-                // TODO: write message to users
+
+                // Send leave msg
+                send_messages(msg, user, &users).await;
             }
             BrokerEvent::Message { user, msg } => {
-                // Loop over each user in the room
-                for (u, sender) in &users {
-                    // If they're the sender of the message, skip since they'll see
-                    // their message twice
-                    if u == &user {
-                        continue;
-                    }
-
-                    // Send to each user
-                    if let Err(e) = sender.send(msg.clone()).await {
-                        eprintln!("{}", e);
-                    };
-                }
+                send_messages(msg, user, &users).await;
             }
         }
     }
 
     Ok(())
+}
+
+async fn send_messages(msg: String, sender: String, users: &HashMap<String, Sender<String>>) {
+    // Loop over each user in the room
+    for (user, tx) in users {
+        // If they're the sender of the message, skip since they'll see
+        // their message twice
+        if user == &sender {
+            continue;
+        }
+
+        // Send to each user
+        if let Err(e) = tx.send(msg.clone()).await {
+            eprintln!("{}", e);
+        };
+    }
 }
 
 async fn receive_messages(mut messages: Receiver<String>, stream: SharedStream) {
