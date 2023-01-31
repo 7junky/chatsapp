@@ -11,7 +11,10 @@ async fn main() -> io::Result<()> {
     let redis = RedisClient::open("redis://:redis@127.0.0.1/").unwrap();
     let redis = Arc::new(redis);
 
-    let rooms = broker::bootstrap_rooms();
+    let rooms = match broker::bootstrap_rooms(&redis).await {
+        Ok(r) => r,
+        Err(e) => panic!("{}", e),
+    };
 
     loop {
         let redis = Arc::clone(&redis);

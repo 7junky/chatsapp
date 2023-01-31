@@ -5,8 +5,8 @@ use std::{
 
 use redis::{AsyncCommands, Client};
 
-pub enum RoomEvent<'a> {
-    Chat(&'a str),
+pub enum RoomEvent {
+    Chat(String),
     Join,
     Leave,
 }
@@ -62,13 +62,13 @@ pub async fn new(redis: &Client, room: &str) -> Result<(), RoomError> {
     Ok(())
 }
 
-pub async fn list<'a>(redis: &Client) -> Result<HashSet<String>, RoomError> {
+pub async fn list(redis: &Client) -> Result<Vec<String>, RoomError> {
     let mut conn = redis.get_async_connection().await.map_err(|e| {
         dbg!("{}", e);
         RoomError::FailedToConnect
     })?;
 
-    let rooms: HashSet<String> = conn.keys("room*").await.map_err(|e| {
+    let rooms: Vec<String> = conn.keys("room*").await.map_err(|e| {
         dbg!("{}", e);
         RoomError::FailedToFetch
     })?;
@@ -76,9 +76,9 @@ pub async fn list<'a>(redis: &Client) -> Result<HashSet<String>, RoomError> {
     Ok(rooms)
 }
 
-pub async fn event<'a>(
+pub async fn event(
     redis: &Client,
-    event: RoomEvent<'a>,
+    event: RoomEvent,
     room: &str,
     username: &str,
 ) -> Result<String, RoomError> {
@@ -92,7 +92,7 @@ pub async fn event<'a>(
 
     let msg = match event {
         RoomEvent::Chat(message) => {
-            let chat = gen_chat(username, message);
+            let chat = gen_chat(username, &message);
 
             conn.zadd(key, &chat, score).await.map_err(|e| {
                 dbg!("{}", e);

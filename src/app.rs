@@ -51,7 +51,7 @@ impl App {
 
         let stream = Arc::new(Mutex::new(writer));
 
-        greeting(stream.clone()).await?;
+        write_greeting(stream.clone()).await?;
 
         while let Some(message) = lines.next_line().await? {
             let command = Command::parse(message);
@@ -59,12 +59,12 @@ impl App {
 
             match command {
                 Command::Help => {
-                    help(stream).await?;
+                    write_help(stream).await?;
                 }
                 Command::List => {
                     match room::list(&self.redis).await {
-                        Ok(list) => rooms(stream, list).await?,
-                        Err(e) => error(stream, e).await?,
+                        Ok(list) => write_rooms(stream, list).await?,
+                        Err(e) => write_error(stream, e).await?,
                     };
                 }
                 Command::Me => {
@@ -75,7 +75,7 @@ impl App {
                 }
                 Command::CreateRoom(room) => {
                     if let Err(e) = room::new(&self.redis, &room).await {
-                        error(stream, e).await?
+                        write_error(stream, e).await?
                     };
 
                     broker::spawn_broker(room, &room_map).await;
@@ -90,7 +90,7 @@ impl App {
                     self.handle_leave(stream, &room_map).await?;
                 }
                 Command::Invalid => {
-                    invalid(stream).await?;
+                    write_invalid(stream).await?;
                 }
                 Command::Exit => break,
             }
@@ -105,7 +105,7 @@ impl App {
             self.user.username, self.user.addr
         );
 
-        write_all(stream, info.as_bytes()).await?;
+        write_write_all(stream, info.as_bytes()).await?;
 
         Ok(())
     }
@@ -121,7 +121,7 @@ impl App {
                 // TODO: Check username not empty
                 let msg = match room::event(
                     &self.redis,
-                    RoomEvent::Chat(&msg),
+                    RoomEvent::Chat(msg),
                     room,
                     self.user.username.as_ref().unwrap(),
                 )
@@ -129,7 +129,7 @@ impl App {
                 {
                     Ok(msg) => msg,
                     Err(e) => {
-                        error(stream, e).await?;
+                        write_error(stream, e).await?;
                         return Ok(());
                     }
                 };
@@ -142,10 +142,10 @@ impl App {
                 // Send message event
                 let user = self.user.username.as_ref().unwrap().to_owned();
                 if let Err(e) = tx.send(BrokerEvent::Message { user, msg }).await {
-                    error(stream, e).await?;
+                    write_error(stream, e).await?;
                 }
             }
-            State::Outside => not_in_room(stream).await?,
+            State::Outside => write_not_in_room(stream).await?,
         }
         Ok(())
     }
@@ -172,7 +172,7 @@ impl App {
                 {
                     Ok(msg) => msg,
                     Err(e) => {
-                        error(stream, e).await?;
+                        write_error(stream, e).await?;
                         return Ok(());
                     }
                 };
@@ -188,7 +188,7 @@ impl App {
                 {
                     Ok(msg) => msg,
                     Err(e) => {
-                        error(stream, e).await?;
+                        write_error(stream, e).await?;
                         return Ok(());
                     }
                 };
@@ -203,7 +203,7 @@ impl App {
                     })
                     .await
                 {
-                    error(stream.clone(), e).await?;
+                    write_error(stream.clone(), e).await?;
                 };
 
                 // Notify new room of joining
@@ -216,7 +216,7 @@ impl App {
                     })
                     .await
                 {
-                    error(stream, e).await?;
+                    write_error(stream, e).await?;
                 };
 
                 // Update state
@@ -235,7 +235,7 @@ impl App {
                 {
                     Ok(msg) => msg,
                     Err(e) => {
-                        error(stream, e).await?;
+                        write_error(stream, e).await?;
                         return Ok(());
                     }
                 };
@@ -250,7 +250,7 @@ impl App {
                     })
                     .await
                 {
-                    error(stream, e).await?;
+                    write_error(stream, e).await?;
                 };
 
                 // Update state
@@ -276,7 +276,7 @@ impl App {
                 {
                     Ok(msg) => msg,
                     Err(e) => {
-                        error(stream, e).await?;
+                        write_error(stream, e).await?;
                         return Ok(());
                     }
                 };
@@ -292,38 +292,38 @@ impl App {
                     })
                     .await
                 {
-                    error(stream, e).await?;
+                    write_error(stream, e).await?;
                 };
 
                 // Update state
                 self.state = State::Outside
             }
-            State::Outside => not_in_room(stream).await?,
+            State::Outside => write_not_in_room(stream).await?,
         }
 
         Ok(())
     }
 }
 
-async fn greeting(stream: SharedStream) -> io::Result<()> {
+async fn write_greeting(stream: SharedStream) -> io::Result<()> {
     let greeting = b"Welcome to ChatsApp!
 Enter \">help\" for a list of commands and their usage.\n\n\n";
 
-    write_all(stream, greeting).await?;
+    write_write_all(stream, greeting).await?;
 
     Ok(())
 }
 
-async fn invalid(stream: SharedStream) -> io::Result<()> {
+async fn write_invalid(stream: SharedStream) -> io::Result<()> {
     let invalid = b"Invalid command.
 Enter \">help\" for a list of commands and their usage.\n";
 
-    write_all(stream, invalid).await?;
+    write_write_all(stream, invalid).await?;
 
     Ok(())
 }
 
-async fn help(stream: SharedStream) -> io::Result<()> {
+async fn write_help(stream: SharedStream) -> io::Result<()> {
     let help = b"\
 Commands:
 >help              - Display commands
@@ -334,12 +334,12 @@ Commands:
 >create-room room  - Create room
 >join-room room    - Join room\n";
 
-    write_all(stream, help).await?;
+    write_write_all(stream, help).await?;
 
     Ok(())
 }
 
-async fn rooms(stream: SharedStream, list: HashSet<String>) -> io::Result<()> {
+async fn write_rooms(stream: SharedStream, list: Vec<String>) -> io::Result<()> {
     let mut res = String::new();
 
     for room in list {
@@ -347,24 +347,24 @@ async fn rooms(stream: SharedStream, list: HashSet<String>) -> io::Result<()> {
         res.push_str("\n");
     }
 
-    write_all(stream, res.as_bytes()).await?;
+    write_write_all(stream, res.as_bytes()).await?;
 
     Ok(())
 }
 
-async fn error(stream: SharedStream, error: impl std::error::Error) -> io::Result<()> {
-    write_all(stream, error.to_string().as_bytes()).await?;
+async fn write_error(stream: SharedStream, error: impl std::error::Error) -> io::Result<()> {
+    write_write_all(stream, error.to_string().as_bytes()).await?;
 
     Ok(())
 }
 
-async fn not_in_room(stream: SharedStream) -> io::Result<()> {
-    write_all(stream, b"You're not currently in a room.\n").await?;
+async fn write_not_in_room(stream: SharedStream) -> io::Result<()> {
+    write_write_all(stream, b"You're not currently in a room.\n").await?;
 
     Ok(())
 }
 
-async fn write_all(stream: SharedStream, bytes: &[u8]) -> io::Result<()> {
+async fn write_write_all(stream: SharedStream, bytes: &[u8]) -> io::Result<()> {
     let mut stream = stream.lock().await;
     stream.write_all(bytes).await?;
 

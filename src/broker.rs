@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use redis::Client as RedisClient;
 use tokio::{
     io::{self, AsyncWriteExt},
     net::tcp::OwnedWriteHalf,
@@ -11,6 +12,8 @@ use tokio::{
         Mutex, RwLock,
     },
 };
+
+use crate::room::{self, RoomError};
 
 pub type SharedStream = Arc<Mutex<OwnedWriteHalf>>;
 
@@ -33,11 +36,23 @@ pub enum BrokerEvent {
 
 pub type RoomMap = Arc<RwLock<HashMap<String, Sender<BrokerEvent>>>>;
 
-pub fn bootstrap_rooms() -> RoomMap {
-    // TODO: Since rooms are persisted in redis, calling this function
-    // should fetch and store into map, spawning new brokers for each.
+// Since rooms are persisted in redis, this function fetches and
+// stores each room into map, spawning new brokers for each.
+pub async fn bootstrap_rooms(redis: &RedisClient) -> Result<RoomMap, RoomError> {
+    let room_map = Arc::new(RwLock::new(HashMap::new()));
 
-    Arc::new(RwLock::new(HashMap::new()))
+    // Get rooms:
+    let mut rooms = room::list(redis).await?;
+
+    // Spawn broker for each room
+    while let Some(mut room) = rooms.pop() {
+        // Remove `room:`
+        room = room.split_off(5);
+
+        spawn_broker(room, &room_map).await;
+    }
+
+    Ok(room_map)
 }
 
 pub async fn spawn_broker(room: String, rooms_map: &RoomMap) {
