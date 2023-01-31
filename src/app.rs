@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -68,7 +67,7 @@ impl App {
                     };
                 }
                 Command::Me => {
-                    self.user_info(stream).await?;
+                    self.write_user_info(stream).await?;
                 }
                 Command::SetUsername(username) => {
                     self.user.username = Some(username);
@@ -81,6 +80,11 @@ impl App {
                     broker::spawn_broker(room, &room_map).await;
                 }
                 Command::JoinRoom(room) => {
+                    if self.user.username.is_none() {
+                        write_set_username(stream).await?;
+                        continue;
+                    }
+
                     self.handle_join(stream, room, &room_map).await?;
                 }
                 Command::Message(msg) => {
@@ -99,13 +103,13 @@ impl App {
         Ok(())
     }
 
-    async fn user_info(&self, stream: SharedStream) -> io::Result<()> {
+    async fn write_user_info(&self, stream: SharedStream) -> io::Result<()> {
         let info = format!(
             "Username: {:?}, IP: {}\n",
             self.user.username, self.user.addr
         );
 
-        write_write_all(stream, info.as_bytes()).await?;
+        write_all(stream, info.as_bytes()).await?;
 
         Ok(())
     }
@@ -118,7 +122,6 @@ impl App {
     ) -> io::Result<()> {
         match self.state {
             State::Inside(ref room) => {
-                // TODO: Check username not empty
                 let msg = match room::event(
                     &self.redis,
                     RoomEvent::Chat(msg),
@@ -161,7 +164,6 @@ impl App {
 
         match self.state {
             State::Inside(ref current_room) => {
-                // TODO: Check username not empty
                 let leave_msg = match room::event(
                     &self.redis,
                     RoomEvent::Leave,
@@ -177,7 +179,6 @@ impl App {
                     }
                 };
 
-                // TODO: Check username not empty
                 let join_msg = match room::event(
                     &self.redis,
                     RoomEvent::Join,
@@ -223,7 +224,6 @@ impl App {
                 self.state = State::Inside(new_room)
             }
             State::Outside => {
-                // TODO: Check username not empty
                 // TODO: Check no redis errors
                 let msg = match room::event(
                     &self.redis,
@@ -309,7 +309,7 @@ async fn write_greeting(stream: SharedStream) -> io::Result<()> {
     let greeting = b"Welcome to ChatsApp!
 Enter \">help\" for a list of commands and their usage.\n\n\n";
 
-    write_write_all(stream, greeting).await?;
+    write_all(stream, greeting).await?;
 
     Ok(())
 }
@@ -318,7 +318,7 @@ async fn write_invalid(stream: SharedStream) -> io::Result<()> {
     let invalid = b"Invalid command.
 Enter \">help\" for a list of commands and their usage.\n";
 
-    write_write_all(stream, invalid).await?;
+    write_all(stream, invalid).await?;
 
     Ok(())
 }
@@ -334,7 +334,7 @@ Commands:
 >create-room room  - Create room
 >join-room room    - Join room\n";
 
-    write_write_all(stream, help).await?;
+    write_all(stream, help).await?;
 
     Ok(())
 }
@@ -347,24 +347,34 @@ async fn write_rooms(stream: SharedStream, list: Vec<String>) -> io::Result<()> 
         res.push_str("\n");
     }
 
-    write_write_all(stream, res.as_bytes()).await?;
+    write_all(stream, res.as_bytes()).await?;
 
     Ok(())
 }
 
 async fn write_error(stream: SharedStream, error: impl std::error::Error) -> io::Result<()> {
-    write_write_all(stream, error.to_string().as_bytes()).await?;
+    write_all(stream, error.to_string().as_bytes()).await?;
 
     Ok(())
 }
 
 async fn write_not_in_room(stream: SharedStream) -> io::Result<()> {
-    write_write_all(stream, b"You're not currently in a room.\n").await?;
+    write_all(stream, b"You're not currently in a room.\n").await?;
 
     Ok(())
 }
 
-async fn write_write_all(stream: SharedStream, bytes: &[u8]) -> io::Result<()> {
+async fn write_set_username(stream: SharedStream) -> io::Result<()> {
+    write_all(
+        stream,
+        b"You need to pick a username before joining a room\n",
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn write_all(stream: SharedStream, bytes: &[u8]) -> io::Result<()> {
     let mut stream = stream.lock().await;
     stream.write_all(bytes).await?;
 
