@@ -29,4 +29,4 @@ the map with their `Sender`. Then a task is spawned with the `Receiver` and user
 
 * `BrokerEvent::LeaveRoom` - This removes a user from the brokers users map. This causes the `Sender` to get dropped, which then results in the receiver task closing.
 
-* `BrokerEvent::Message` - This sends a message to all users connected to the room.
+* `BrokerEvent::Message` - This sends a message to all users inside the room.
