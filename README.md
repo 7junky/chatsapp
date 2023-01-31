@@ -25,7 +25,7 @@ Rooms and messages are persisted using Redis. Every time the server starts, room
 Each broker task will have an mpsc `Sender` stored in a map, which can be fetched any time someone intends on joining a room. Here are the events it expects:
 
 * `BrokerEvent::JoinRoom` - The broker keeps a map of who is currently connected to the room. When someone joins, a channel is created and they're inserted to
-the map with their `Sender`. Then a task is spawned with the `Receiver` and users `TcpStream`, which waits for messages and writes them to the users.
+the map with their `Sender`. Then a task is spawned with the `Receiver` and users `TcpStream`, which waits for messages and writes them to the user.
 
 * `BrokerEvent::LeaveRoom` - This removes a user from the brokers users map. This causes the `Sender` to get dropped, which then results in the receiver task closing.
 
