@@ -51,7 +51,7 @@ pub async fn new(redis: &Client, room: &str) -> Result<(), RoomError> {
     }
 
     // Key, member, score
-    conn.zadd(key, "Start of chat", 0).await.map_err(|e| {
+    conn.zadd(key, "Start of chat\n", 0).await.map_err(|e| {
         dbg!("{}", e);
         RoomError::FailedToSend
     })?;
@@ -121,6 +121,36 @@ pub async fn event(
     };
 
     Ok(msg)
+}
+
+pub async fn recent_msgs(redis: &Client, room: &str) -> Result<Vec<String>, RoomError> {
+    let mut conn = redis.get_async_connection().await.map_err(|e| {
+        dbg!("{}", e);
+        RoomError::FailedToConnect
+    })?;
+
+    let key = gen_key(room);
+
+    let mut offset: u128 = conn.zcount(&key, 0, "inf").await.map_err(|e| {
+        dbg!(e);
+        RoomError::FailedToFetch
+    })?;
+
+    if offset < 10 {
+        offset = 0
+    } else {
+        offset -= 10
+    }
+
+    let msgs: Vec<String> = conn
+        .zrangebyscore_limit(key, 0, "inf", offset as isize, 10)
+        .await
+        .map_err(|e| {
+            dbg!(e);
+            RoomError::FailedToFetch
+        })?;
+
+    Ok(msgs)
 }
 
 fn gen_key(name: &str) -> String {

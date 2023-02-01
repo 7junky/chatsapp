@@ -62,7 +62,7 @@ impl App {
                 }
                 Command::List => {
                     match room::list(&self.redis).await {
-                        Ok(list) => write_rooms(stream, list).await?,
+                        Ok(list) => write_list(stream, list, true).await?,
                         Err(e) => write_error(stream, e).await?,
                     };
                 }
@@ -85,7 +85,18 @@ impl App {
                         continue;
                     }
 
-                    self.handle_join(stream, room, &room_map).await?;
+                    self.handle_join(Arc::clone(&stream), room.clone(), &room_map)
+                        .await?;
+
+                    let recent_msgs = match room::recent_msgs(&self.redis, &room).await {
+                        Ok(m) => m,
+                        Err(e) => {
+                            write_error(stream, e).await?;
+                            continue;
+                        }
+                    };
+
+                    write_list(stream, recent_msgs, false).await?;
                 }
                 Command::Message(msg) => {
                     self.handle_message(stream, msg, &room_map).await?;
@@ -339,12 +350,14 @@ Commands:
     Ok(())
 }
 
-async fn write_rooms(stream: SharedStream, list: Vec<String>) -> io::Result<()> {
+async fn write_list(stream: SharedStream, list: Vec<String>, new_line: bool) -> io::Result<()> {
     let mut res = String::new();
 
-    for room in list {
-        res.push_str(&room);
-        res.push_str("\n");
+    for item in list {
+        res.push_str(&item);
+        if new_line {
+            res.push_str("\n");
+        }
     }
 
     write_all(stream, res.as_bytes()).await?;
