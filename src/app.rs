@@ -122,33 +122,7 @@ impl App {
         room_map: &RoomMap,
     ) -> io::Result<()> {
         match self.state {
-            State::Inside(ref room) => {
-                let msg = match room::event(
-                    &self.redis,
-                    RoomEvent::Chat(msg),
-                    room,
-                    self.user.username.as_ref().unwrap(),
-                )
-                .await
-                {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        write_error(stream, e).await?;
-                        return Ok(());
-                    }
-                };
-
-                let room_map = room_map.read().await;
-
-                // Get room sender
-                let tx = room_map.get(room).unwrap();
-
-                // Send message event
-                let user = self.user.username.as_ref().unwrap().to_owned();
-                if let Err(e) = tx.send(BrokerEvent::Message { user, msg }).await {
-                    write_error(stream, e).await?;
-                }
-            }
+            State::Inside(ref room) => self.send_message(stream, &room_map, room, msg).await?,
             State::Outside => write_not_in_room(stream).await?,
         }
         Ok(())
@@ -160,142 +134,18 @@ impl App {
         new_room: String,
         room_map: &RoomMap,
     ) -> io::Result<()> {
-        let room_map = room_map.read().await;
-        let user = self.user.username.as_ref().unwrap();
-
         match self.state {
             State::Inside(ref current_room) => {
-                let leave_msg = match room::event(
-                    &self.redis,
-                    RoomEvent::Leave,
-                    &current_room,
-                    self.user.username.as_ref().unwrap(),
-                )
-                .await
-                {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        write_error(stream, e).await?;
-                        return Ok(());
-                    }
-                };
+                self.leave_room(stream.clone(), &room_map, current_room)
+                    .await?;
 
-                // Notify current room of leaving
-                let current_tx = room_map.get(current_room).unwrap();
-
-                if let Err(e) = current_tx
-                    .send(BrokerEvent::LeaveRoom {
-                        user: user.to_owned(),
-                        msg: leave_msg,
-                    })
-                    .await
-                {
-                    write_error(stream.clone(), e).await?;
-                };
-
-                // Get new rooms tx
-                let new_tx = match room_map.get(&new_room) {
-                    Some(tx) => tx,
-                    None => {
-                        write_room_not_found(stream.clone()).await?;
-
-                        return Ok(());
-                    }
-                };
-
-                // Join message
-                let join_msg = match room::event(
-                    &self.redis,
-                    RoomEvent::Join,
-                    &new_room,
-                    self.user.username.as_ref().unwrap(),
-                )
-                .await
-                {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        write_error(stream, e).await?;
-                        return Ok(());
-                    }
-                };
-
-                // Send broker event
-                if let Err(e) = new_tx
-                    .send(BrokerEvent::JoinRoom {
-                        user: user.to_owned(),
-                        stream: Arc::clone(&stream),
-                        msg: join_msg,
-                    })
-                    .await
-                {
-                    write_error(stream.clone(), e).await?;
-                };
-
-                // Write recent messages
-                let recent_msgs = match room::recent_msgs(&self.redis, &new_room).await {
-                    Ok(m) => m,
-                    Err(e) => {
-                        write_error(stream, e).await?;
-
-                        return Ok(());
-                    }
-                };
-
-                write_list(stream, recent_msgs, false).await?;
+                self.join_room(stream, room_map, &new_room).await?;
 
                 // Update state
                 self.state = State::Inside(new_room)
             }
             State::Outside => {
-                // Get new rooms tx
-                let new_tx = match room_map.get(&new_room) {
-                    Some(tx) => tx,
-                    None => {
-                        write_room_not_found(stream).await?;
-
-                        return Ok(());
-                    }
-                };
-
-                // Join message
-                let msg = match room::event(
-                    &self.redis,
-                    RoomEvent::Join,
-                    &new_room,
-                    self.user.username.as_ref().unwrap(),
-                )
-                .await
-                {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        write_error(stream, e).await?;
-                        return Ok(());
-                    }
-                };
-
-                // Send broker event
-                if let Err(e) = new_tx
-                    .send(BrokerEvent::JoinRoom {
-                        user: user.to_owned(),
-                        stream: Arc::clone(&stream),
-                        msg,
-                    })
-                    .await
-                {
-                    write_error(stream.clone(), e).await?;
-                };
-
-                // Write recent messages
-                let recent_msgs = match room::recent_msgs(&self.redis, &new_room).await {
-                    Ok(m) => m,
-                    Err(e) => {
-                        write_error(stream, e).await?;
-
-                        return Ok(());
-                    }
-                };
-
-                write_list(stream, recent_msgs, false).await?;
+                self.join_room(stream, &room_map, &new_room).await?;
 
                 // Update state
                 self.state = State::Inside(new_room)
@@ -306,44 +156,161 @@ impl App {
     }
 
     async fn handle_leave(&mut self, stream: SharedStream, room_map: &RoomMap) -> io::Result<()> {
-        let room_map = room_map.read().await;
-
         match self.state {
             State::Inside(ref room) => {
-                let msg = match room::event(
-                    &self.redis,
-                    RoomEvent::Leave,
-                    room,
-                    self.user.username.as_ref().unwrap(),
-                )
-                .await
-                {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        write_error(stream, e).await?;
-                        return Ok(());
-                    }
-                };
-
-                // Notify room of leaving
-                let tx = room_map.get(room).unwrap();
-                let user = self.user.username.as_ref().unwrap();
-
-                if let Err(e) = tx
-                    .send(BrokerEvent::LeaveRoom {
-                        user: user.to_owned(),
-                        msg,
-                    })
-                    .await
-                {
-                    write_error(stream, e).await?;
-                };
+                self.leave_room(stream, &room_map, room).await?;
 
                 // Update state
                 self.state = State::Outside
             }
             State::Outside => write_not_in_room(stream).await?,
         }
+
+        Ok(())
+    }
+
+    async fn send_message(
+        &self,
+        stream: SharedStream,
+        room_map: &RoomMap,
+        room: &String,
+        msg: String,
+    ) -> io::Result<()> {
+        let room_map = room_map.read().await;
+        let user = self.user.username.as_ref().unwrap();
+
+        // Get room tx
+        let tx = room_map.get(room).unwrap();
+
+        let msg = match room::event(
+            &self.redis,
+            RoomEvent::Chat(msg),
+            room,
+            self.user.username.as_ref().unwrap(),
+        )
+        .await
+        {
+            Ok(msg) => msg,
+            Err(e) => {
+                write_error(stream, e).await?;
+                return Ok(());
+            }
+        };
+
+        // Send broker event
+        if let Err(e) = tx
+            .send(BrokerEvent::Message {
+                user: user.to_owned(),
+                msg,
+            })
+            .await
+        {
+            write_error(stream, e).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn join_room(
+        &self,
+        stream: SharedStream,
+        room_map: &RoomMap,
+        room: &String,
+    ) -> io::Result<()> {
+        let room_map = room_map.read().await;
+        let user = self.user.username.as_ref().unwrap();
+
+        // Get new rooms tx
+        let new_tx = match room_map.get(room) {
+            Some(tx) => tx,
+            None => {
+                write_room_not_found(stream.clone()).await?;
+
+                return Ok(());
+            }
+        };
+
+        // Join message
+        let join_msg = match room::event(
+            &self.redis,
+            RoomEvent::Join,
+            &room,
+            self.user.username.as_ref().unwrap(),
+        )
+        .await
+        {
+            Ok(msg) => msg,
+            Err(e) => {
+                write_error(stream, e).await?;
+
+                return Ok(());
+            }
+        };
+
+        // Send broker event
+        if let Err(e) = new_tx
+            .send(BrokerEvent::JoinRoom {
+                user: user.to_owned(),
+                stream: Arc::clone(&stream),
+                msg: join_msg,
+            })
+            .await
+        {
+            write_error(stream.clone(), e).await?;
+        };
+
+        // Write recent messages
+        let recent_msgs = match room::recent_msgs(&self.redis, &room).await {
+            Ok(m) => m,
+            Err(e) => {
+                write_error(stream, e).await?;
+
+                return Ok(());
+            }
+        };
+        write_list(stream, recent_msgs, false).await?;
+
+        Ok(())
+    }
+
+    async fn leave_room(
+        &self,
+        stream: SharedStream,
+        room_map: &RoomMap,
+        room: &String,
+    ) -> io::Result<()> {
+        let room_map = room_map.read().await;
+        let user = self.user.username.as_ref().unwrap();
+
+        // Get rooms tx
+        let tx = room_map.get(room).unwrap();
+
+        // Leave msg
+        let msg = match room::event(
+            &self.redis,
+            RoomEvent::Leave,
+            room,
+            self.user.username.as_ref().unwrap(),
+        )
+        .await
+        {
+            Ok(msg) => msg,
+            Err(e) => {
+                write_error(stream, e).await?;
+                return Ok(());
+            }
+        };
+
+        // Send broker event
+        if let Err(e) = tx
+            .send(BrokerEvent::LeaveRoom {
+                user: user.to_owned(),
+                msg,
+            })
+            .await
+        {
+            write_error(stream, e).await?;
+        };
 
         Ok(())
     }
