@@ -4,6 +4,7 @@ use std::sync::Arc;
 use redis::Client as RedisClient;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 
 use crate::broker::BrokerEvent;
@@ -20,7 +21,10 @@ pub struct User {
 }
 
 enum State {
-    Inside(String),
+    Inside {
+        room: String,
+        tx: Sender<BrokerEvent>,
+    },
     Outside,
 }
 
@@ -89,10 +93,10 @@ impl App {
                         .await?;
                 }
                 Command::Message(msg) => {
-                    self.handle_message(stream, msg, &room_map).await?;
+                    self.handle_message(stream, msg).await?;
                 }
                 Command::Leave => {
-                    self.handle_leave(stream, &room_map).await?;
+                    self.handle_leave(stream).await?;
                 }
                 Command::Invalid => {
                     write_invalid(stream).await?;
@@ -119,10 +123,10 @@ impl App {
         &mut self,
         stream: SharedStream,
         msg: String,
-        room_map: &RoomMap,
+        // room_map: &RoomMap,
     ) -> io::Result<()> {
-        match self.state {
-            State::Inside(ref room) => self.send_message(stream, &room_map, room, msg).await?,
+        match &self.state {
+            State::Inside { room, tx } => self.send_message(stream, tx, room, msg).await?,
             State::Outside => write_not_in_room(stream).await?,
         }
         Ok(())
@@ -134,31 +138,30 @@ impl App {
         new_room: String,
         room_map: &RoomMap,
     ) -> io::Result<()> {
-        match self.state {
-            State::Inside(ref current_room) => {
-                self.leave_room(stream.clone(), &room_map, current_room)
-                    .await?;
+        match &self.state {
+            State::Inside { room, tx } => {
+                self.leave_room(stream.clone(), tx, room).await?;
 
-                self.join_room(stream, room_map, &new_room).await?;
-
-                // Update state
-                self.state = State::Inside(new_room)
+                if let Some(tx) = self.join_room(stream, room_map, &new_room).await? {
+                    // Update state
+                    self.state = State::Inside { room: new_room, tx }
+                };
             }
             State::Outside => {
-                self.join_room(stream, &room_map, &new_room).await?;
-
-                // Update state
-                self.state = State::Inside(new_room)
+                if let Some(tx) = self.join_room(stream, &room_map, &new_room).await? {
+                    // Update state
+                    self.state = State::Inside { room: new_room, tx }
+                }
             }
         }
 
         Ok(())
     }
 
-    async fn handle_leave(&mut self, stream: SharedStream, room_map: &RoomMap) -> io::Result<()> {
-        match self.state {
-            State::Inside(ref room) => {
-                self.leave_room(stream, &room_map, room).await?;
+    async fn handle_leave(&mut self, stream: SharedStream) -> io::Result<()> {
+        match &self.state {
+            State::Inside { room, tx } => {
+                self.leave_room(stream, tx, room).await?;
 
                 // Update state
                 self.state = State::Outside
@@ -172,15 +175,11 @@ impl App {
     async fn send_message(
         &self,
         stream: SharedStream,
-        room_map: &RoomMap,
+        tx: &Sender<BrokerEvent>,
         room: &String,
         msg: String,
     ) -> io::Result<()> {
-        let room_map = room_map.read().await;
         let user = self.user.username.as_ref().unwrap();
-
-        // Get room tx
-        let tx = room_map.get(room).unwrap();
 
         let msg = match room::event(
             &self.redis,
@@ -216,17 +215,17 @@ impl App {
         stream: SharedStream,
         room_map: &RoomMap,
         room: &String,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<Sender<BrokerEvent>>> {
         let room_map = room_map.read().await;
         let user = self.user.username.as_ref().unwrap();
 
         // Get new rooms tx
-        let new_tx = match room_map.get(room) {
-            Some(tx) => tx,
+        let tx = match room_map.get(room) {
+            Some(tx) => tx.clone(),
             None => {
                 write_room_not_found(stream.clone()).await?;
 
-                return Ok(());
+                return Ok(None);
             }
         };
 
@@ -243,12 +242,12 @@ impl App {
             Err(e) => {
                 write_error(stream, e).await?;
 
-                return Ok(());
+                return Ok(None);
             }
         };
 
         // Send broker event
-        if let Err(e) = new_tx
+        if let Err(e) = tx
             .send(BrokerEvent::JoinRoom {
                 user: user.to_owned(),
                 stream: Arc::clone(&stream),
@@ -257,6 +256,8 @@ impl App {
             .await
         {
             write_error(stream.clone(), e).await?;
+
+            return Ok(None);
         };
 
         // Write recent messages
@@ -265,25 +266,22 @@ impl App {
             Err(e) => {
                 write_error(stream, e).await?;
 
-                return Ok(());
+                // Connected by this point so return tx
+                return Ok(Some(tx));
             }
         };
         write_list(stream, recent_msgs, false).await?;
 
-        Ok(())
+        Ok(Some(tx))
     }
 
     async fn leave_room(
         &self,
         stream: SharedStream,
-        room_map: &RoomMap,
+        tx: &Sender<BrokerEvent>,
         room: &String,
     ) -> io::Result<()> {
-        let room_map = room_map.read().await;
         let user = self.user.username.as_ref().unwrap();
-
-        // Get rooms tx
-        let tx = room_map.get(room).unwrap();
 
         // Leave msg
         let msg = match room::event(
