@@ -2,18 +2,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use redis::Client as RedisClient;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 
-use crate::broker::BrokerEvent;
-use crate::room::RoomEvent;
-use crate::{
-    broker::{self, RoomMap, SharedStream},
-    command::Command,
-    room,
-};
+use crate::broker::{self, BrokerEvent, RoomMap, SharedStream};
+use crate::command::Command;
+use crate::room::{self, RoomEvent};
 
 pub struct User {
     addr: String,
@@ -30,14 +27,22 @@ enum State {
 
 pub struct App {
     redis: Arc<RedisClient>,
+    stream: SharedStream,
+    lines: Lines<BufReader<OwnedReadHalf>>,
     user: User,
     state: State,
 }
 
 impl App {
-    pub fn new(addr: SocketAddr, redis: Arc<RedisClient>) -> Self {
+    pub fn new(stream: TcpStream, addr: SocketAddr, redis: Arc<RedisClient>) -> Self {
+        let (reader, writer) = stream.into_split();
+        let lines = BufReader::new(reader).lines();
+        let stream = Arc::new(Mutex::new(writer));
+
         Self {
             redis,
+            stream,
+            lines,
             user: User {
                 addr: addr.to_string(),
                 username: None,
@@ -46,46 +51,39 @@ impl App {
         }
     }
 
-    pub async fn run(&mut self, stream: TcpStream, room_map: RoomMap) -> io::Result<()> {
-        let (reader, writer) = stream.into_split();
+    pub async fn run(mut self, room_map: RoomMap) -> io::Result<()> {
+        self.write_greeting().await?;
 
-        let buf_reader = BufReader::new(reader);
-        let mut lines = buf_reader.lines();
-
-        let stream = Arc::new(Mutex::new(writer));
-
-        write_greeting(stream.clone()).await?;
-
-        while let Some(message) = lines.next_line().await? {
+        while let Some(message) = self.lines.next_line().await? {
             let command = Command::parse(message);
-            let stream = stream.clone();
+            let stream = self.stream.clone();
 
             match command {
                 Command::Help => {
-                    write_help(stream).await?;
+                    self.write_help().await?;
                 }
                 Command::List => {
                     match room::list(&self.redis).await {
-                        Ok(list) => write_list(stream, list, true).await?,
-                        Err(e) => write_error(stream, e).await?,
+                        Ok(list) => self.write_list(list, true).await?,
+                        Err(e) => self.write_error(e).await?,
                     };
                 }
                 Command::Me => {
-                    self.write_user_info(stream).await?;
+                    self.write_user_info().await?;
                 }
                 Command::SetUsername(username) => {
                     self.user.username = Some(username);
                 }
                 Command::CreateRoom(room) => {
                     if let Err(e) = room::new(&self.redis, &room).await {
-                        write_error(stream, e).await?
+                        self.write_error(e).await?
                     };
 
                     broker::spawn_broker(room, &room_map).await;
                 }
                 Command::JoinRoom(room) => {
                     if self.user.username.is_none() {
-                        write_set_username(stream).await?;
+                        self.write_set_username().await?;
                         continue;
                     }
 
@@ -93,13 +91,13 @@ impl App {
                         .await?;
                 }
                 Command::Message(msg) => {
-                    self.handle_message(stream, msg).await?;
+                    self.handle_message(msg).await?;
                 }
                 Command::Leave => {
-                    self.handle_leave(stream).await?;
+                    self.handle_leave().await?;
                 }
                 Command::Invalid => {
-                    write_invalid(stream).await?;
+                    self.write_invalid().await?;
                 }
                 Command::Exit => break,
             }
@@ -108,26 +106,21 @@ impl App {
         Ok(())
     }
 
-    async fn write_user_info(&self, stream: SharedStream) -> io::Result<()> {
+    async fn write_user_info(&self) -> io::Result<()> {
         let info = format!(
             "Username: {:?}, IP: {}\n",
             self.user.username, self.user.addr
         );
 
-        write_all(stream, info.as_bytes()).await?;
+        self.write_all(info.as_bytes()).await?;
 
         Ok(())
     }
 
-    async fn handle_message(
-        &mut self,
-        stream: SharedStream,
-        msg: String,
-        // room_map: &RoomMap,
-    ) -> io::Result<()> {
+    async fn handle_message(&mut self, msg: String) -> io::Result<()> {
         match &self.state {
-            State::Inside { room, tx } => self.send_message(stream, tx, room, msg).await?,
-            State::Outside => write_not_in_room(stream).await?,
+            State::Inside { room, tx } => self.send_message(tx, room, msg).await?,
+            State::Outside => self.write_not_in_room().await?,
         }
         Ok(())
     }
@@ -140,7 +133,7 @@ impl App {
     ) -> io::Result<()> {
         match &self.state {
             State::Inside { room, tx } => {
-                self.leave_room(stream.clone(), tx, room).await?;
+                self.leave_room(tx, room).await?;
 
                 if let Some(tx) = self.join_room(stream, room_map, &new_room).await? {
                     // Update state
@@ -158,15 +151,15 @@ impl App {
         Ok(())
     }
 
-    async fn handle_leave(&mut self, stream: SharedStream) -> io::Result<()> {
+    async fn handle_leave(&mut self) -> io::Result<()> {
         match &self.state {
             State::Inside { room, tx } => {
-                self.leave_room(stream, tx, room).await?;
+                self.leave_room(tx, room).await?;
 
                 // Update state
                 self.state = State::Outside
             }
-            State::Outside => write_not_in_room(stream).await?,
+            State::Outside => self.write_not_in_room().await?,
         }
 
         Ok(())
@@ -174,7 +167,6 @@ impl App {
 
     async fn send_message(
         &self,
-        stream: SharedStream,
         tx: &Sender<BrokerEvent>,
         room: &String,
         msg: String,
@@ -191,7 +183,7 @@ impl App {
         {
             Ok(msg) => msg,
             Err(e) => {
-                write_error(stream, e).await?;
+                self.write_error(e).await?;
                 return Ok(());
             }
         };
@@ -204,7 +196,7 @@ impl App {
             })
             .await
         {
-            write_error(stream, e).await?;
+            self.write_error(e).await?;
         }
 
         Ok(())
@@ -223,7 +215,7 @@ impl App {
         let tx = match room_map.get(room) {
             Some(tx) => tx.clone(),
             None => {
-                write_room_not_found(stream.clone()).await?;
+                self.write_room_not_found().await?;
 
                 return Ok(None);
             }
@@ -240,7 +232,7 @@ impl App {
         {
             Ok(msg) => msg,
             Err(e) => {
-                write_error(stream, e).await?;
+                self.write_error(e).await?;
 
                 return Ok(None);
             }
@@ -255,7 +247,7 @@ impl App {
             })
             .await
         {
-            write_error(stream.clone(), e).await?;
+            self.write_error(e).await?;
 
             return Ok(None);
         };
@@ -264,23 +256,18 @@ impl App {
         let recent_msgs = match room::recent_msgs(&self.redis, &room).await {
             Ok(m) => m,
             Err(e) => {
-                write_error(stream, e).await?;
+                self.write_error(e).await?;
 
                 // Connected by this point so return tx
                 return Ok(Some(tx));
             }
         };
-        write_list(stream, recent_msgs, false).await?;
+        self.write_list(recent_msgs, false).await?;
 
         Ok(Some(tx))
     }
 
-    async fn leave_room(
-        &self,
-        stream: SharedStream,
-        tx: &Sender<BrokerEvent>,
-        room: &String,
-    ) -> io::Result<()> {
+    async fn leave_room(&self, tx: &Sender<BrokerEvent>, room: &String) -> io::Result<()> {
         let user = self.user.username.as_ref().unwrap();
 
         // Leave msg
@@ -294,7 +281,7 @@ impl App {
         {
             Ok(msg) => msg,
             Err(e) => {
-                write_error(stream, e).await?;
+                self.write_error(e).await?;
                 return Ok(());
             }
         };
@@ -307,33 +294,32 @@ impl App {
             })
             .await
         {
-            write_error(stream, e).await?;
+            self.write_error(e).await?;
         };
 
         Ok(())
     }
-}
 
-async fn write_greeting(stream: SharedStream) -> io::Result<()> {
-    let greeting = b"Welcome to ChatsApp!
+    async fn write_greeting(&self) -> io::Result<()> {
+        let greeting = b"Welcome to ChatsApp!
 Enter \">help\" for a list of commands and their usage.\n\n\n";
 
-    write_all(stream, greeting).await?;
+        self.write_all(greeting).await?;
 
-    Ok(())
-}
+        Ok(())
+    }
 
-async fn write_invalid(stream: SharedStream) -> io::Result<()> {
-    let invalid = b"Invalid command.
+    async fn write_invalid(&self) -> io::Result<()> {
+        let invalid = b"Invalid command.
 Enter \">help\" for a list of commands and their usage.\n";
 
-    write_all(stream, invalid).await?;
+        self.write_all(invalid).await?;
 
-    Ok(())
-}
+        Ok(())
+    }
 
-async fn write_help(stream: SharedStream) -> io::Result<()> {
-    let help = b"\
+    async fn write_help(&self) -> io::Result<()> {
+        let help = b"\
 Commands:
 >help              - Display commands
 >exit              - Close connection
@@ -343,57 +329,55 @@ Commands:
 >create-room room  - Create room
 >join-room room    - Join room\n";
 
-    write_all(stream, help).await?;
+        self.write_all(help).await?;
 
-    Ok(())
-}
-
-async fn write_list(stream: SharedStream, list: Vec<String>, new_line: bool) -> io::Result<()> {
-    let mut res = String::new();
-
-    for item in list {
-        res.push_str(&item);
-        if new_line {
-            res.push_str("\n");
-        }
+        Ok(())
     }
 
-    write_all(stream, res.as_bytes()).await?;
+    async fn write_list(&self, list: Vec<String>, new_line: bool) -> io::Result<()> {
+        let mut res = String::new();
 
-    Ok(())
-}
+        for item in list {
+            res.push_str(&item);
+            if new_line {
+                res.push_str("\n");
+            }
+        }
 
-async fn write_error(stream: SharedStream, error: impl std::error::Error) -> io::Result<()> {
-    write_all(stream, error.to_string().as_bytes()).await?;
+        self.write_all(res.as_bytes()).await?;
 
-    Ok(())
-}
+        Ok(())
+    }
 
-async fn write_not_in_room(stream: SharedStream) -> io::Result<()> {
-    write_all(stream, b"You're not currently in a room.\n").await?;
+    async fn write_error(&self, error: impl std::error::Error) -> io::Result<()> {
+        self.write_all(error.to_string().as_bytes()).await?;
 
-    Ok(())
-}
+        Ok(())
+    }
 
-async fn write_room_not_found(stream: SharedStream) -> io::Result<()> {
-    write_all(stream, b"Room not found\n").await?;
+    async fn write_not_in_room(&self) -> io::Result<()> {
+        self.write_all(b"You're not currently in a room.\n").await?;
 
-    Ok(())
-}
+        Ok(())
+    }
 
-async fn write_set_username(stream: SharedStream) -> io::Result<()> {
-    write_all(
-        stream,
-        b"You need to pick a username before joining a room\n",
-    )
-    .await?;
+    async fn write_room_not_found(&self) -> io::Result<()> {
+        self.write_all(b"Room not found\n").await?;
 
-    Ok(())
-}
+        Ok(())
+    }
 
-async fn write_all(stream: SharedStream, bytes: &[u8]) -> io::Result<()> {
-    let mut stream = stream.lock().await;
-    stream.write_all(bytes).await?;
+    async fn write_set_username(&self) -> io::Result<()> {
+        self.write_all(b"You need to pick a username before joining a room\n")
+            .await?;
 
-    Ok(())
+        Ok(())
+    }
+
+    async fn write_all(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut stream = self.stream.lock().await;
+        stream.write_all(bytes).await?;
+
+        Ok(())
+    }
 }

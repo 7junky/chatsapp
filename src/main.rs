@@ -22,9 +22,9 @@ async fn main() -> io::Result<()> {
 
         let (stream, addr) = listener.accept().await?;
         tokio::spawn(async move {
-            let mut app = App::new(addr, redis);
+            let app = App::new(stream, addr, redis);
 
-            if let Err(e) = app.run(stream, rooms).await {
+            if let Err(e) = app.run(rooms).await {
                 eprintln!("{}", e)
             };
         });
