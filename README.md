@@ -21,8 +21,8 @@ Commands:
 
 ## Implementation
 
-Rooms and messages are persisted using Redis. Every time the server starts, rooms are fetched from Redis and broker tasks are spawned for each of them.
-Each broker task will have an mpsc `Sender` stored in a map, which can be fetched any time someone intends on joining a room. Here are the events it expects:
+Rooms and messages are persisted using Redis. Every time the server starts, rooms are fetched from Redis and broker tasks are spawned for each one.
+Each broker task will have an mpsc `Sender` stored in a map, which is cloned everytime someone joins a room. Here are the events it expects:
 
 * `BrokerEvent::JoinRoom` - The broker keeps a map of who is currently connected to the room. When someone joins, a channel is created and they're inserted to
 the map with their `Sender`. Then a task is spawned with the `Receiver` and users `TcpStream`, which waits for messages and writes them to the user.
